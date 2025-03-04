@@ -44,7 +44,7 @@ class CRNN(nn.Module):
             self.decoder = None
             
     
-    def forward(self, x):
+    def forward(self, x, training_mode):
         # conv layers
         x = F.relu(self.conv1(x))
         x = self.pool1(x)
@@ -72,7 +72,7 @@ class CRNN(nn.Module):
         # map to character size
         logits = self.linear(x)
         
-        if self.training:
+        if training_mode:
             return logits
         else:
             # do the CTC only during inference time

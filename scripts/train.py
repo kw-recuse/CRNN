@@ -1,14 +1,10 @@
+import json
+import os
 from tqdm.notebook import tqdm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import torchaudio
-
-import os
-import json
-import logging
-
 from models.crrn import CRNN
 from data.dataloader import create_dataloaders
 
@@ -18,7 +14,7 @@ class Trainer:
         self.config = self._load_config(config_file)
         
         # take the jeyword args
-        for key in ['cehckpoints_path']:
+        for key in ['checkpoints_path']:
             if key in kwargs:
                 self.config[key] = kwargs[key]
         
@@ -30,7 +26,7 @@ class Trainer:
         self.log_per_epoch = self.config['log_per_epoch']
         self.patience_limit = self.config['patience_limit']
         self.curr_patience = 0
-        self.best_val_loss = 0.0
+        self.best_val_loss = 10000.0
 
         # create checkpoint dir
         os.makedirs(self.checkpoints_path, exist_ok=True)
@@ -75,16 +71,16 @@ class Trainer:
                 label = label.to(self.device)
                 label_lengths = label_lengths.to(self.device)
                 
-                logits = self.model(img)
+                logits = self.model(img, True)
             
                 T = logits.size(1) 
                 N = logits.size(0) 
                 logits = logits.permute(1, 0, 2)
                 input_lengths = torch.full((N,), T, dtype=torch.long).to(self.device)
                 
-                avg_val_loss += self.ctc_loss(logits, label, input_lengths, label_lengths)
+                avg_val_loss += self.ctc_loss(logits, label, input_lengths, label_lengths).item()
             
-            val_steps += 1
+                val_steps += 1
         
         
         avg_val_loss = avg_val_loss / val_steps
@@ -102,61 +98,59 @@ class Trainer:
             'epoch': epoch,
             'step': step,
             'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'scaler_state_dict': self.scaler.state_dict()
+            'optimizer_state_dict': self.opt.state_dict(),
         }, checkpoint_path)
         tqdm.write(f"Checkpoint saved at {checkpoint_path}")
     
     def train(self):
         self.model.train()
         for epoch in tqdm(range(self.epoch_num), desc="Epochs"):
-            total_loss = 0
-            batch_progress_bar = tqdm(enumerate(self.train_dataloader),
-                                    total=len(self.train_dataloader),
+            batch_progress_bar = tqdm(enumerate(self.train_loader),
+                                    total=len(self.train_loader),
                                     desc=f"Epoch {epoch+1}/{self.epoch_num}",
                                     leave=False
                                     ) 
             
         
-        for step, batch in batch_progress_bar:
-            img, label, label_lengths = batch
+            for step, batch in batch_progress_bar:
+                img, label, label_lengths = batch
 
-            # move tensors to device
-            img = img.to(self.device)
-            label = label.to(self.device)
-            label_lengths = label_lengths.to(self.device)
-            
-            # forward propagation
-            logits = self.model(img)
-            
-            T = logits.size(1) 
-            N = logits.size(0) 
-            logits = logits.permute(1, 0, 2)  # (T, N, C)
-            input_lengths = torch.full((N,), T, dtype=torch.long).to(self.device)
-            
-            # calculate loss
-            loss = self.ctc_loss(logits, label, input_lengths, label_lengths)
-            
-            # backward propagation
-            self.opt.zero_grad()
-            loss.backward()
-            self.opt.step()
-            
-            self.train_log_file.write(f"{loss.item():.4f}\n")
-            self.train_log_file.flush()
-            batch_progress_bar.set_postfix(Step=step+1, Loss=round(loss.item(), 4))
-            
-            # get the loss on validation set and save checkpoit
-            if (step+1) * self.log_step == 0 or step == len(self.train_loader) - 1:
-                val_loss = self.evaluate_val_loss(epoch+1, step+1)
-                self.save_checkpoint(epoch+1, step+1, val_loss)
+                # move tensors to device
+                img = img.to(self.device)
+                label = label.to(self.device)
+                label_lengths = label_lengths.to(self.device)
                 
-                # check patience
-                if val_loss < self.best_val_loss:
-                    self.curr_patience = 0
-                    self.best_val_loss = val_loss
-                else:
-                    self.curr_patience += 1
-                    if self.curr_patience >= self.patience_limit:
-                        # stop the training
-                        return
+                # forward propagation
+                logits = self.model(img, True)
+                
+                T = logits.size(1) 
+                N = logits.size(0) 
+                logits = logits.permute(1, 0, 2)  # (T, N, C)
+                input_lengths = torch.full((N,), T, dtype=torch.long).to(self.device)
+                
+                # calculate loss
+                loss = self.ctc_loss(logits, label, input_lengths, label_lengths)
+                
+                # backward propagation
+                self.opt.zero_grad()
+                loss.backward()
+                self.opt.step()
+                
+                self.train_log_file.write(f"{loss.item():.4f}\n")
+                self.train_log_file.flush()
+                batch_progress_bar.set_postfix(Step=step+1, Loss=round(loss.item(), 4))
+                
+                # get the loss on validation set and save checkpoit
+                if (step+1) % self.log_step == 0 or step == len(self.train_loader) - 1:
+                    val_loss = self.evaluate_val_loss(epoch+1, step+1)
+                    self.save_checkpoint(epoch+1, step+1, val_loss)
+                    
+                    # check patience
+                    if val_loss < self.best_val_loss:
+                        self.curr_patience = 0
+                        self.best_val_loss = val_loss
+                    else:
+                        self.curr_patience += 1
+                        if self.curr_patience >= self.patience_limit:
+                            # stop the training
+                            return
